@@ -1,0 +1,82 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend — typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install deps
+        run: npm ci
+        working-directory: .
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Tests
+        run: npm test
+
+  frontend:
+    name: Frontend — typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install deps
+        run: npm ci
+        working-directory: .
+
+      - name: Typecheck
+        run: npm run type-check
+
+  cfn-validate:
+    name: CloudFormation — validate templates
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-3
+          role-session-name: GitHubActions-CFNValidate
+
+      - name: Validate DataStack
+        run: aws cloudformation validate-template --template-body file://cloudformation/data-stack.yaml
+
+      - name: Validate ApiStack
+        run: aws cloudformation validate-template --template-body file://cloudformation/api-stack.yaml
+
+      - name: Validate FrontendStack
+        run: aws cloudformation validate-template --template-body file://cloudformation/frontend-stack.yaml

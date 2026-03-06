@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+backend/dist/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+
+# Lambda packaging
+lambda-pkg/
+lambda.zip
+
+# Environment variables — copy .env.local.example to .env.local, never commit .env.local
+frontend/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

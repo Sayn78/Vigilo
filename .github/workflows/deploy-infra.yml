@@ -1,0 +1,84 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cloudformation/**'
+      - 'backend/**'
+      - '.github/workflows/deploy-infra.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: CloudFormation Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install all deps
+        run: npm ci
+
+      - name: Run backend tests
+        run: npm test
+        working-directory: backend
+
+      - name: Build Lambda (TypeScript → dist/)
+        run: npm run build
+        working-directory: backend
+
+      - name: Package Lambda (production deps only)
+        run: |
+          mkdir -p lambda-pkg
+          cp -r backend/dist lambda-pkg/dist
+          # Install prod-only deps in lambda-pkg/ outside the workspace to avoid hoisting
+          cp backend/package.json lambda-pkg/package.json
+          cd lambda-pkg && npm install --omit=dev --ignore-scripts && rm package.json && cd ..
+          zip -r lambda.zip lambda-pkg/
+          echo "Lambda ZIP size: $(du -sh lambda.zip | cut -f1)"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-3
+          role-session-name: GitHubActions-CFNDeploy
+
+      - name: Upload Lambda ZIP to S3
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          aws s3 cp lambda.zip s3://vigilo-lambda-code-${ACCOUNT_ID}/lambda.zip
+
+      - name: Deploy DataStack
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/data-stack.yaml \
+            --stack-name DataStack \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy ApiStack
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/api-stack.yaml \
+            --stack-name ApiStack \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy FrontendStack
+        run: |
+          aws cloudformation deploy \
+            --template-file cloudformation/frontend-stack.yaml \
+            --stack-name FrontendStack \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset

@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Vigilo - DataStack - DynamoDB + Cognito
+
+Parameters:
+  LambdaCodeBucket:
+    Type: String
+    Default: vigilo-lambda-code-880958246344
+    Description: Bucket S3 contenant le ZIP de deploiement Lambda
+  LambdaCodeKey:
+    Type: String
+    Default: lambda.zip
+    Description: Cle S3 du ZIP Lambda
+
+Resources:
+
+  PostConfirmationPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: status-page-post-confirmation-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: cognito-idp:AdminUpdateUserAttributes
+            Resource: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+
+  PostConfirmationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: status-page-post-confirmation-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref PostConfirmationPolicy
+
+  PostConfirmationFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-post-confirmation
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/cognito-post-confirmation/index.handler
+      Role: !GetAtt PostConfirmationRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  MainTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: status-page-main
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: slug
+          AttributeType: S
+        - AttributeName: entityType
+          AttributeType: S
+        - AttributeName: enabled
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: SlugIndex
+          KeySchema:
+            - AttributeName: slug
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EnabledMonitorsIndex
+          KeySchema:
+            - AttributeName: entityType
+              KeyType: HASH
+            - AttributeName: enabled
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ChecksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: status-page-checks
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: monitorId
+          AttributeType: S
+        - AttributeName: checkedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: MonitorTimeIndex
+          KeySchema:
+            - AttributeName: monitorId
+              KeyType: HASH
+            - AttributeName: checkedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: status-page-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: tenantId
+          AttributeDataType: String
+          Mutable: true
+          StringAttributeConstraints:
+            MinLength: '36'
+            MaxLength: '36'
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFn.Arn
+
+  PostConfirmationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostConfirmationFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: status-page-web
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 43200
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: minutes
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - http://localhost:3000/auth/callback
+        - https://vigilo.senan.fr/auth/callback
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub status-page-${AWS::AccountId}
+
+Outputs:
+  MainTableName:
+    Value: !Ref MainTable
+    Export:
+      Name: StatusPageMainTableName
+
+  ChecksTableName:
+    Value: !Ref ChecksTable
+    Export:
+      Name: StatusPageChecksTableName
+
+  UserPoolId:
+    Value: !Ref UserPool
+    Export:
+      Name: StatusPageUserPoolId
+
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+    Export:
+      Name: StatusPageWebClientId
+
+  UserPoolIssuerUrl:
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+    Export:
+      Name: StatusPageUserPoolIssuerUrl
+
+  CognitoDomain:
+    Value: !Sub https://status-page-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com
+    Export:
+      Name: StatusPageCognitoDomain

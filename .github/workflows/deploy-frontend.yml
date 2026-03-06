@@ -1,0 +1,116 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy Next.js
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-3
+          role-session-name: GitHubActions-FrontendDeploy
+
+      # Read CloudFormation stack outputs to get all runtime values
+      - name: Get stack outputs
+        id: outputs
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ApiStack \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)
+          echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
+
+          USER_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name DataStack \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+            --output text)
+          echo "user_pool_id=$USER_POOL_ID" >> "$GITHUB_OUTPUT"
+
+          WEB_CLIENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name DataStack \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
+            --output text)
+          echo "web_client_id=$WEB_CLIENT_ID" >> "$GITHUB_OUTPUT"
+
+          COGNITO_DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name DataStack \
+            --query "Stacks[0].Outputs[?OutputKey=='CognitoDomain'].OutputValue" \
+            --output text)
+          echo "cognito_domain=$COGNITO_DOMAIN" >> "$GITHUB_OUTPUT"
+
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name FrontendStack \
+            --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+            --output text)
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+
+          DIST_ID=$(aws cloudformation describe-stacks \
+            --stack-name FrontendStack \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" \
+            --output text)
+          echo "dist_id=$DIST_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build Next.js static export
+        run: npm run build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: ${{ steps.outputs.outputs.api_url }}
+          NEXT_PUBLIC_USER_POOL_ID: ${{ steps.outputs.outputs.user_pool_id }}
+          NEXT_PUBLIC_USER_POOL_CLIENT_ID: ${{ steps.outputs.outputs.web_client_id }}
+          NEXT_PUBLIC_COGNITO_DOMAIN: ${{ steps.outputs.outputs.cognito_domain }}
+
+      # Hashed assets (_next/static/*) → cache 1 year (immutable)
+      - name: Sync hashed assets (long cache)
+        run: |
+          aws s3 sync frontend/out/_next/static \
+            s3://${{ steps.outputs.outputs.bucket }}/_next/static \
+            --cache-control "public, max-age=31536000, immutable" \
+            --delete
+
+      # HTML and other files → no cache
+      - name: Sync other files (no cache)
+        run: |
+          aws s3 sync frontend/out \
+            s3://${{ steps.outputs.outputs.bucket }} \
+            --exclude "_next/static/*" \
+            --cache-control "public, max-age=0, must-revalidate" \
+            --delete
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.outputs.outputs.dist_id }} \
+            --paths "/*"
+
+      - name: Print deployed URL
+        run: |
+          DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name FrontendStack \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionDomain'].OutputValue" \
+            --output text)
+          echo "Frontend deployed to: https://$DOMAIN"

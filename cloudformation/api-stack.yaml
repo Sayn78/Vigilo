@@ -1,0 +1,453 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Vigilo - ApiStack - Lambda + API Gateway + EventBridge
+
+Parameters:
+  LambdaCodeBucket:
+    Type: String
+    Default: vigilo-lambda-code-880958246344
+    Description: Bucket S3 contenant le ZIP de deploiement Lambda
+  LambdaCodeKey:
+    Type: String
+    Default: lambda.zip
+    Description: Cle S3 du ZIP Lambda
+
+Resources:
+
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: status-page-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:BatchWriteItem
+              - dynamodb:TransactWriteItems
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/status-page-main
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/status-page-main/index/*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/status-page-checks
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/status-page-checks/index/*
+          - Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:DeleteTopic
+              - sns:Publish
+              - sns:ListSubscriptionsByTopic
+            Resource: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:status-page-*
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: status-page-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref LambdaExecutionPolicy
+
+  PublicStatusFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-public-status
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/public-status/index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 29
+      MemorySize: 256
+      Environment:
+        Variables:
+          MAIN_TABLE_NAME: !ImportValue StatusPageMainTableName
+          CHECKS_TABLE_NAME: !ImportValue StatusPageChecksTableName
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  AdminOrgFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-admin-org
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/admin-org/index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 29
+      MemorySize: 256
+      Environment:
+        Variables:
+          MAIN_TABLE_NAME: !ImportValue StatusPageMainTableName
+          CHECKS_TABLE_NAME: !ImportValue StatusPageChecksTableName
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  AdminMonitorFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-admin-monitor
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/admin-monitor/index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 29
+      MemorySize: 256
+      Environment:
+        Variables:
+          MAIN_TABLE_NAME: !ImportValue StatusPageMainTableName
+          CHECKS_TABLE_NAME: !ImportValue StatusPageChecksTableName
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  AdminIncidentFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-admin-incident
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/admin-incident/index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 29
+      MemorySize: 256
+      Environment:
+        Variables:
+          MAIN_TABLE_NAME: !ImportValue StatusPageMainTableName
+          CHECKS_TABLE_NAME: !ImportValue StatusPageChecksTableName
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  HealthCheckFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: status-page-health-check
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: dist/handlers/health-check-runner/index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Timeout: 240
+      MemorySize: 512
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          MAIN_TABLE_NAME: !ImportValue StatusPageMainTableName
+          CHECKS_TABLE_NAME: !ImportValue StatusPageChecksTableName
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+  HealthCheckRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: status-page-health-check-rule
+      Description: Triggers the health check Lambda every 5 minutes
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: HealthCheckTarget
+          Arn: !GetAtt HealthCheckFn.Arn
+
+  HealthCheckEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt HealthCheckFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HealthCheckRule.Arn
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: status-page-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - http://localhost:3000
+          - https://*
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        MaxAge: 86400
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      Name: CognitoAuthorizer
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !ImportValue StatusPageWebClientId
+        Issuer: !ImportValue StatusPageUserPoolIssuerUrl
+
+  PublicStatusIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PublicStatusFn.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  AdminOrgIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdminOrgFn.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  AdminMonitorIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdminMonitorFn.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  AdminIncidentIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdminIncidentFn.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  PublicStatusPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PublicStatusFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  AdminOrgPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AdminOrgFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  AdminMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AdminMonitorFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  AdminIncidentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AdminIncidentFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  RouteGetPublicStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /public/status/{slug}
+      Target: !Sub integrations/${PublicStatusIntegration}
+
+  RouteGetPublicHistory:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /public/status/{slug}/history
+      Target: !Sub integrations/${PublicStatusIntegration}
+
+  RouteGetAdminOrg:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/org
+      Target: !Sub integrations/${AdminOrgIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePostAdminOrg:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /admin/org
+      Target: !Sub integrations/${AdminOrgIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePutAdminOrg:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /admin/org
+      Target: !Sub integrations/${AdminOrgIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteDeleteAdminOrg:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /admin/org
+      Target: !Sub integrations/${AdminOrgIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetMonitors:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/monitors
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePostMonitors:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /admin/monitors
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetMonitor:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/monitors/{monitorId}
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePutMonitor:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /admin/monitors/{monitorId}
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteDeleteMonitor:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /admin/monitors/{monitorId}
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetMonitorChecks:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/monitors/{monitorId}/checks
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetMonitorUptime:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/monitors/{monitorId}/uptime
+      Target: !Sub integrations/${AdminMonitorIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetIncidents:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/incidents
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePostIncidents:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /admin/incidents
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteGetIncident:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /admin/incidents/{incidentId}
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePutIncident:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /admin/incidents/{incidentId}
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RouteDeleteIncident:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /admin/incidents/{incidentId}
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+  RoutePostIncidentUpdates:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /admin/incidents/{incidentId}/updates
+      Target: !Sub integrations/${AdminIncidentIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: StatusPageApiEndpoint
