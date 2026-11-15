@@ -157,16 +157,26 @@ async function updateOrg(event: APIGatewayProxyEventV2WithJWTAuthorizer) {
   const body = updateOrgSchema.safeParse(JSON.parse(event.body ?? '{}'));
   if (!body.success) throw new HttpError(400, body.error.errors[0].message);
 
+  const current = await getOrgItem(tenantId);
+  const newEmail = body.data.notifyEmail;
+  const emailChanged = !!newEmail && newEmail !== current.notifyEmail;
+
   const updates: string[] = [];
+  const removes: string[] = [];
+  const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
 
+  // "name" is a DynamoDB reserved word: it must go through an attribute name placeholder.
   if (body.data.name) {
-    updates.push('name = :name');
+    updates.push('#name = :name');
+    names['#name'] = 'name';
     values[':name'] = body.data.name;
   }
-  if (body.data.notifyEmail) {
+  if (emailChanged) {
     updates.push('notifyEmail = :email');
-    values[':email'] = body.data.notifyEmail;
+    values[':email'] = newEmail;
+    // The new address has not confirmed its SNS subscription yet.
+    removes.push('snsConfirmedAt');
   }
   updates.push('updatedAt = :now');
   values[':now'] = new Date().toISOString();
@@ -175,11 +185,17 @@ async function updateOrg(event: APIGatewayProxyEventV2WithJWTAuthorizer) {
     new UpdateCommand({
       TableName: MAIN_TABLE,
       Key: { PK: `ORG#${tenantId}`, SK: 'METADATA' },
-      UpdateExpression: `SET ${updates.join(', ')}`,
+      UpdateExpression: `SET ${updates.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
+      ...(Object.keys(names).length ? { ExpressionAttributeNames: names } : {}),
       ExpressionAttributeValues: values,
       ConditionExpression: 'attribute_exists(PK)',
     }),
   );
+
+  // Alerts are delivered through the SNS topic, so the stored email alone changes nothing.
+  if (emailChanged && current.snsTopicArn) {
+    await resubscribeAlertEmail(current.snsTopicArn, current.notifyEmail, newEmail);
+  }
 
   const org = await getOrgItem(tenantId);
   return respond(200, { org: sanitizeOrg(org) });
@@ -208,6 +224,19 @@ async function getOrgItem(tenantId: string): Promise<Org> {
   );
   if (!result.Item) throw new HttpError(404, 'Organization not found');
   return result.Item as Org;
+}
+
+async function resubscribeAlertEmail(topicArn: string, oldEmail: string, newEmail: string) {
+  await sns.send(new SubscribeCommand({ TopicArn: topicArn, Protocol: 'email', Endpoint: newEmail }));
+
+  const subs = await sns.send(new ListSubscriptionsByTopicCommand({ TopicArn: topicArn }));
+  for (const s of subs.Subscriptions ?? []) {
+    // A pending subscription has no ARN yet and cannot be unsubscribed; it expires on its own.
+    const confirmed = s.SubscriptionArn?.startsWith('arn:');
+    if (s.Protocol === 'email' && s.Endpoint === oldEmail && confirmed) {
+      await sns.send(new UnsubscribeCommand({ SubscriptionArn: s.SubscriptionArn }));
+    }
+  }
 }
 
 function sanitizeOrg(org: Org) {
